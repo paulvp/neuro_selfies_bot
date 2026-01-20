@@ -61,6 +61,19 @@ KIA_API_KEY = os.getenv("KIA_API_KEY", "")
 KIA_API_URL = "https://api.kie.ai/api/v1/jobs"
 KIA_MODEL = "google/nano-banana-edit"
 
+# Base prompts (without specific actions - actions will be added dynamically)
+DEFAULT_PROMPT = (
+    "Take a photo taken with a Polaroid camera. The photo should have a slight blur and a consistent light source, "
+    "like a flash from a dark room, scattered throughout the photo. Don't change the faces. "
+    "Change the background behind the two people to a white curtain."
+)
+
+COLLAGE_3_GRID_PROMPT = (
+    "Create a single image in the style of a 3-layer Polaroid photo, formatted for an Instagram Story. "
+    "The final image should look like one seamless photo with a consistent light source, as if taken with a flash in a dark room. "
+    "The background should be a simple white curtain. Do not change the subjects' faces, eyes, or clothing across the layers."
+)
+
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY", "")
 
@@ -138,6 +151,7 @@ class GenerationStates(StatesGroup):
     waiting_for_photo = State()
     choosing_celebrity = State()
     choosing_action = State()
+    choosing_format = State()
 
 def get_db_connection():
     return db_pool.getconn()
@@ -429,8 +443,8 @@ async def upload_image_to_r2(file_path: str) -> Optional[str]:
         logger.error(f"Error uploading user image to R2: {e}")
         return None
 
-async def create_kia_task(image_url: str, prompt: str) -> Dict[str, Any]:
-    """Create a KIA.AI nano-banana-edit generation task"""
+async def create_kia_task_multi(image_urls: list, prompt: str) -> Dict[str, Any]:
+    """Create a KIA.AI nano-banana-edit generation task with multiple images"""
     try:
         headers = {
             "Content-Type": "application/json",
@@ -441,13 +455,13 @@ async def create_kia_task(image_url: str, prompt: str) -> Dict[str, Any]:
             "model": KIA_MODEL,
             "input": {
                 "prompt": prompt,
-                "image_urls": [image_url],
+                "image_urls": image_urls,
                 "output_format": "jpeg",
                 "image_size": "1:1"
             },
         }
 
-        logger.info(f"Creating KIA.AI task with prompt: {prompt[:100]}")
+        logger.info(f"Creating KIA.AI task with {len(image_urls)} images and prompt: {prompt[:100]}")
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -493,13 +507,17 @@ async def create_kia_task(image_url: str, prompt: str) -> Dict[str, Any]:
                         "error_msg": response_text,
                     }
     except Exception as e:
-        logger.error(f"Exception in create_kia_task: {e}", exc_info=True)
+        logger.error(f"Exception in create_kia_task_multi: {e}", exc_info=True)
         return {
             "success": False,
             "task_id": None,
             "error_code": None,
             "error_msg": str(e),
         }
+
+async def create_kia_task(image_url: str, prompt: str) -> Dict[str, Any]:
+    """Create a KIA.AI nano-banana-edit generation task (single image)"""
+    return await create_kia_task_multi([image_url], prompt)
 
 async def check_kia_task_status(task_id: str) -> Optional[Dict]:
     """Check the status of a KIA.AI generation task"""
@@ -613,6 +631,34 @@ async def get_actions() -> list:
         return []
     finally:
         return_db_connection(conn)
+
+async def get_celebrity_image_url(celebrity_name: str) -> Optional[str]:
+    """Get celebrity image URL from database"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT image_url FROM prompts 
+                WHERE type = 'celebrity' AND name = %s AND is_active = TRUE
+            """, (celebrity_name,))
+            result = cur.fetchone()
+            return result['image_url'] if result else None
+    except Exception as e:
+        logger.error(f"Error fetching celebrity image: {e}")
+        return None
+    finally:
+        return_db_connection(conn)
+
+def build_generation_prompt(action_name: str, is_collage: bool = False) -> str:
+    """Build complete generation prompt dynamically by adding action to base prompt"""
+    # Choose base prompt
+    base_prompt = COLLAGE_3_GRID_PROMPT if is_collage else DEFAULT_PROMPT
+    
+    # Add action to the prompt
+    complete_prompt = f"{base_prompt} {action_name}"
+    
+    logger.info(f"Built prompt with action '{action_name}': {complete_prompt[:100]}...")
+    return complete_prompt
 
 def create_celebrity_keyboard(page: int = 0) -> InlineKeyboardMarkup:
     """Create paginated celebrity selection keyboard"""
@@ -734,12 +780,97 @@ async def cmd_start(message: Message, state: FSMContext):
         )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")]
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
+        [InlineKeyboardButton(text="💳 Купить кредиты", callback_data="buy_credits")]
     ])
     
     await message.answer(
-        "💡 Нажми кнопку ниже для инструкции",
+        "💡 Используй /help для списка команд",
         reply_markup=keyboard
+    )
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Handle /help command"""
+    help_text = (
+        "🤖 <b>Доступные команды:</b>\n\n"
+        "/start - Начать работу с ботом\n"
+        "/help - Показать это сообщение\n"
+        "/prompts - Посмотреть доступных знаменитостей и действия\n"
+        "/instruction - Инструкция по использованию\n"
+        "/buy_credits - Купить кредиты для генерации\n\n"
+        "📸 <b>Как использовать:</b>\n"
+        "1. Отправь фото\n"
+        "2. Выбери знаменитость\n"
+        "3. Выбери действие\n"
+        "4. Получи результат!\n\n"
+        "💡 Каждая генерация стоит 1 кредит"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📖 Инструкция", callback_data="instruction")],
+        [InlineKeyboardButton(text="💳 Купить кредиты", callback_data="buy_credits")]
+    ])
+    
+    await message.answer(help_text, parse_mode="HTML", reply_markup=keyboard)
+
+@dp.message(Command("prompts"))
+async def cmd_prompts(message: Message):
+    """Handle /prompts command - show available celebrities and actions"""
+    celebrities = await get_celebrities()
+    actions = await get_actions()
+    
+    celeb_text = ", ".join(celebrities[:20]) if celebrities else "Нет доступных"
+    if len(celebrities) > 20:
+        celeb_text += f" и еще {len(celebrities) - 20}..."
+    
+    action_text = ", ".join(actions[:15]) if actions else "Нет доступных"
+    if len(actions) > 15:
+        action_text += f" и еще {len(actions) - 15}..."
+    
+    prompts_text = (
+        "🎭 <b>Доступные знаменитости:</b>\n"
+        f"{celeb_text}\n\n"
+        "🎬 <b>Доступные действия:</b>\n"
+        f"{action_text}\n\n"
+        "💡 Отправь фото, чтобы начать генерацию!"
+    )
+    
+    await message.answer(prompts_text, parse_mode="HTML")
+
+@dp.message(Command("instruction"))
+async def cmd_instruction(message: Message):
+    """Handle /instruction command"""
+    instruction_text = (
+        "📖 <b>Инструкция по использованию бота</b>\n\n"
+        "1. Пожалуйста, убедитесь, что фото чёткое и не размытое, а в кадре нет посторонних людей\n\n"
+        "2. Лицо должно быть хорошо видно целиком — важно, чтобы его ничего не закрывало\n\n"
+        "⚠️ <b>Обратите внимание:</b> нейросеть с вами не знакома, поэтому при некорректно отправленной "
+        "фотографии она может неточно передать особенности вашего лица\n\n"
+        "💡 <b>Советы для лучшего результата:</b>\n"
+        "• Используйте хорошее освещение\n"
+        "• Смотрите прямо в камеру\n"
+        "• Избегайте солнцезащитных очков и масок\n"
+        "• Убедитесь, что лицо занимает достаточную часть кадра"
+    )
+    
+    await message.answer(instruction_text, parse_mode="HTML")
+
+@dp.message(Command("buy_credits"))
+async def cmd_buy_credits(message: Message):
+    """Handle /buy_credits command"""
+    user_id = message.from_user.id
+    user_data = await get_user_data(user_id)
+    
+    if user_data:
+        total_credits = user_data['credits'] + user_data['additional_credits']
+        credits_text = f"💰 У вас сейчас: {total_credits} кредитов\n\n"
+    else:
+        credits_text = ""
+    
+    await message.answer(
+        f"{credits_text}💳 Выберите пакет кредитов:",
+        reply_markup=create_payment_keyboard(user_id)
     )
 
 @dp.callback_query(F.data == "instruction")
@@ -747,13 +878,21 @@ async def show_instruction(callback: CallbackQuery):
     """Show instruction"""
     user_id = callback.from_user.id
     
-    await callback.answer(
-        "1. Пожалуйста, убедитесь, что фото чёткое и не размытое, а в кадре нет посторонних людей\n"
-        "2. Лицо должно быть хорошо видно целиком — важно, чтобы его ничего не закрывало\n"
-        "⚠️ Обратите внимание: нейросеть с вами не знакома, поэтому при некорректно отправленной"
-        "фотографии она может неточно передать особенности вашего лица",
-        show_alert=True
+    instruction_text = (
+        "📖 <b>Инструкция по использованию бота</b>\n\n"
+        "1. Пожалуйста, убедитесь, что фото чёткое и не размытое, а в кадре нет посторонних людей\n\n"
+        "2. Лицо должно быть хорошо видно целиком — важно, чтобы его ничего не закрывало\n\n"
+        "⚠️ <b>Обратите внимание:</b> нейросеть с вами не знакома, поэтому при некорректно отправленной "
+        "фотографии она может неточно передать особенности вашего лица\n\n"
+        "💡 <b>Советы для лучшего результата:</b>\n"
+        "• Используйте хорошее освещение\n"
+        "• Смотрите прямо в камеру\n"
+        "• Избегайте солнцезащитных очков и масок\n"
+        "• Убедитесь, что лицо занимает достаточную часть кадра"
     )
+    
+    await callback.message.answer(instruction_text, parse_mode="HTML")
+    await callback.answer()
 
 @dp.message(F.photo)
 async def handle_photo(message: Message, state: FSMContext):
@@ -818,7 +957,7 @@ async def back_to_celebrity(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("action_"))
 async def choose_action(callback: CallbackQuery, state: FSMContext):
-    """Handle action selection and generate image"""
+    """Handle action selection and show format options"""
     user_id = callback.from_user.id
     
     if callback.data == "action_random":
@@ -830,8 +969,53 @@ async def choose_action(callback: CallbackQuery, state: FSMContext):
     else:
         action = callback.data.replace("action_", "")
     
+    await state.update_data(action=action)
+    await state.set_state(GenerationStates.choosing_format)
+    
     data = await state.get_data()
     celebrity = data.get('celebrity')
+    
+    # Show format selection
+    format_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 1 фото", callback_data="format_simple")],
+        [InlineKeyboardButton(text="🎞 Коллаж", callback_data="format_collage")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_action")]
+    ])
+    
+    await callback.message.edit_text(
+        f"Знаменитость: {celebrity}\n"
+        f"Действие: {action}\n\n"
+        f"Выберите формат:",
+        reply_markup=format_keyboard
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_action")
+async def back_to_action(callback: CallbackQuery, state: FSMContext):
+    """Go back to action selection"""
+    user_id = callback.from_user.id
+    
+    data = await state.get_data()
+    celebrity = data.get('celebrity')
+    
+    await state.set_state(GenerationStates.choosing_action)
+    keyboard = await create_action_keyboard_async(celebrity)
+    await callback.message.edit_text(
+        f"Выбрана знаменитость: {celebrity}\n\nТеперь выбери действие:",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("format_"))
+async def choose_format(callback: CallbackQuery, state: FSMContext):
+    """Handle format selection and generate image"""
+    user_id = callback.from_user.id
+    
+    is_collage = callback.data == "format_collage"
+    
+    data = await state.get_data()
+    celebrity = data.get('celebrity')
+    action = data.get('action')
     photo_file_id = data.get('photo_file_id')
     
     user_data = await get_user_data(user_id)
@@ -863,18 +1047,31 @@ async def choose_action(callback: CallbackQuery, state: FSMContext):
         await bot.download_file(file.file_path, file_path)
         
         progress_msg = await callback.message.edit_text("⏳ Загружаю фото...")
-        image_url = await upload_image_to_r2(file_path)
+        user_image_url = await upload_image_to_r2(file_path)
         
-        if not image_url:
+        if not user_image_url:
             await add_credits(user_id, 1, "refund", 0)
             await progress_msg.edit_text("❌ Ошибка при загрузке фото. Кредиты возвращены.")
             await state.clear()
             return
         
-        prompt = f"A photo of a person with {celebrity}, {action}"
+        # Get celebrity image URL from database
+        celebrity_image_url = await get_celebrity_image_url(celebrity)
+        if not celebrity_image_url:
+            await add_credits(user_id, 1, "refund", 0)
+            await progress_msg.edit_text("❌ Изображение знаменитости не найдено. Кредиты возвращены.")
+            await state.clear()
+            return
         
-        await progress_msg.edit_text("⏳ Создаю задачу генерации...")
-        task_result = await create_kia_task(image_url, prompt)
+        # Build dynamic prompt: base prompt + action
+        prompt = build_generation_prompt(action, is_collage)
+        
+        # Combine images: celebrity image + user image
+        image_urls = [celebrity_image_url, user_image_url]
+        
+        format_text = "коллаж" if is_collage else "простое фото"
+        await progress_msg.edit_text(f"⏳ Создаю задачу генерации ({format_text})...")
+        task_result = await create_kia_task_multi(image_urls, prompt)
         
         if not task_result["success"]:
             await add_credits(user_id, 1, "refund", 0)
@@ -906,7 +1103,8 @@ async def choose_action(callback: CallbackQuery, state: FSMContext):
         result_text = (
             f"✅ Готово!\n\n"
             f"Знаменитость: {celebrity}\n"
-            f"Действие: {action}\n\n"
+            f"Действие: {action}\n"
+            f"Формат: {'Коллаж' if is_collage else 'Простое фото'}\n\n"
             f"Осталось кредитов: {total_credits - 1}"
         )
         
