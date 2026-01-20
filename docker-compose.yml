@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  neuro-selfies-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: neuro-selfies-bot:latest
+    container_name: neuro-selfies-bot
+    restart: unless-stopped
+    
+    volumes:
+      - ./temp:/app/temp
+      - ./logs:/app/logs
+      - ./examples:/app/examples:ro
+    
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_USERNAME=${BOT_USERNAME:-neuro_selfies_bot}
+      - DATABASE_URL=${DATABASE_URL}
+      - ADMIN_USER_IDS=${ADMIN_USER_IDS}
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}
+      - R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME}
+      - R2_PUBLIC_URL=${R2_PUBLIC_URL}
+      - KIA_API_KEY=${KIA_API_KEY}
+      - TZ=Europe/Moscow
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 0.5
+    
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'python.*bot.py' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+    
+    network_mode: bridge
+    
+    stop_grace_period: 15s
